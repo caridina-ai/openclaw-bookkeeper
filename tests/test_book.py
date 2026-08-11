@@ -267,6 +267,37 @@ class BookCLITest(unittest.TestCase):
             "2026-07-09 00:00 刪除 #2 外食費 (午夜餐) 120 餘額 380 -> 500",
         )
 
+    def test_edit_when_moves_an_entry_and_keeps_what_was_not_given(self):
+        """AI 這條路也要改得動時間。
+
+        以前 `edit` 只能改金額／科目／品項，AI 想搬時間只好自己下 SQL——
+        上線第一天就這樣做了，還失敗了兩次。`--date` 是搜尋條件不是新值，
+        名字很容易誤用，所以這裡把三種精度全部釘住。
+        """
+        self.run_book("in", "--note", "期初", "--amount", "1000", "--date", "2026-07-01")
+        self.run_book(
+            "out", "--category", "買菜金", "--note", "水果",
+            "--amount", "127", "--date", "2026-08-09 22:09",
+        )
+        self.assertEqual(
+            self.run_book("edit", "--rowid", "2", "--when", "2026-08-09 12:09"),
+            "2026-08-09 12:09 #2 買菜金 (水果) 127 餘額 873",
+        )
+        # 只給日期 → 留著 12:09；只給時間 → 留著 8/10
+        self.assertEqual(
+            self.run_book("edit", "--rowid", "2", "--when", "2026-08-10"),
+            "2026-08-10 12:09 #2 買菜金 (水果) 127 餘額 873",
+        )
+        self.assertEqual(
+            self.run_book("edit", "--rowid", "2", "--when", "8:05"),
+            "2026-08-10 08:05 #2 買菜金 (水果) 127 餘額 873",
+        )
+        # 一次只能改一個欄位，--when 也算在裡面
+        self.assertIn(
+            "請擇一提供",
+            self.run_book("edit", "--rowid", "2", "--when", "2026-08-10", "--to", "99"),
+        )
+
     def test_edit_and_delete_accept_or_search_terms(self):
         self.run_book(
             "in", "--note", "期初", "--amount", "1000", "--date", "2026-07-01"

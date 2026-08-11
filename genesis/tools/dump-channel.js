@@ -5,6 +5,14 @@
 //   node dump-channel.js --channel telegram --target -100XXXXXXXXXX --format md
 //   node dump-channel.js --tap ../.tap --user-only --format txt
 //
+// .tap 長這樣（本身不進版控，裡面有頻道 id）：
+//   channel: telegram
+//   target: -100XXXXXXXXXX
+//   since: 2026-08-11 15:58      ← 上次檢討看到哪裡；# 開頭的行是註解
+//
+// since 會自動生效：只印那個時間點之後的紀錄，要看全部就 --since 0。
+// 每做完一輪檢討就把 since 推到當下——它是接力棒，不是紀念碑。
+//
 // 為什麼要有這支：openclaw CLI 沒有「讀取頻道歷史」的指令。
 //   openclaw session search        → 沒有這個指令（只有 sessions list/tail/...）
 //   openclaw message read --channel telegram → Unsupported Telegram action: read
@@ -36,15 +44,21 @@ const has = (name) => argv.includes('--' + name);
 
 let channel = arg('channel');
 let target = arg('target');
+let since = arg('since');
+const tapBots = [];
 const tapPath = arg('tap');
 if (tapPath) {
   for (const line of fs.readFileSync(tapPath, 'utf8').split('\n')) {
-    const m = line.match(/^\s*(channel|target)\s*:\s*(.+?)\s*$/);
-    if (m) { if (m[1] === 'channel') channel = m[2]; else target = m[2]; }
+    const m = line.match(/^\s*(channel|target|since|bot)\s*:\s*(.+?)\s*$/);
+    if (!m) continue;                       // # 開頭的註解就是這樣被略過的
+    if (m[1] === 'channel') channel = m[2];
+    else if (m[1] === 'target') target = m[2];
+    else if (m[1] === 'bot') tapBots.push(m[2]);
+    else if (since === undefined) since = m[2];   // --since 蓋過 .tap
   }
 }
 if (!channel || !target) {
-  console.error('usage: node dump-channel.js (--tap <file> | --channel <c> --target <id>) [--agent <id>] [--format md|txt|json] [--user-only]');
+  console.error('usage: node dump-channel.js (--tap <file> | --channel <c> --target <id>) [--agent <id>] [--format md|txt|json] [--user-only] [--since "YYYY-MM-DD HH:MM"|0]');
   process.exit(2);
 }
 
@@ -53,6 +67,27 @@ const agentsDir = path.join(stateDir, 'agents');
 const onlyAgent = arg('agent');
 const format = arg('format', 'txt');
 const userOnly = has('user-only');
+
+// since：只看這個時間點之後的紀錄。所有時間戳都是「YYYY-MM-DD HH:MM:SS」
+// 的當地時間字串，補滿到同寬之後直接字串比大小就對了，不必經過 Date。
+// `--since 0`（或任何補不成日期的值）等於不過濾。
+const pad = (ts) => {
+  const raw = String(ts == null ? '' : ts).trim().replace('T', ' ');
+  if (raw.length === 10) return raw + ' 00:00:00';   // 只有日期
+  if (raw.length === 16) return raw + ':00';         // 到分
+  return raw.slice(0, 19);
+};
+const sinceStamp = (() => {
+  const raw = String(since === undefined ? '' : since).trim().replace('T', ' ');
+  if (!/^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$/.test(raw)) return null;
+  return pad(raw);
+})();
+const localStamp = (ms) => {
+  const d = new Date(ms);
+  const two = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ` +
+         `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+};
 
 // target 正規化：telegram 是裸 id，discord 是 channel:<id>，session key 是
 // agent:<id>:<channel>:<group|channel>:<rawId>。統一剝到裸 id 再比對。
@@ -180,9 +215,12 @@ const extras = noId
 const missing = [];
 if (all.length) for (let i = all[0].id; i <= all[all.length - 1].id; i++) if (!byId.has(String(i))) missing.push(i);
 
-// --user-only 只留人類發言。機器人叫什麼名字每個人不一樣，用 --bot 指定
-// （可重複）；沒指定就退回「只留出現次數最多的那個發話者」這個粗略猜法。
-const botNames = argv.reduce((acc, a, i) => (a === '--bot' ? [...acc, argv[i + 1]] : acc), []);
+// --user-only 只留人類發言。機器人叫什麼名字每個人不一樣：先看 --bot
+// （可重複），再看 .tap 的 bot:，都沒有才退回「只留出現次數最多的那個
+// 發話者」這個粗略猜法——猜錯會整份濾錯，所以 .tap 裡該寫就寫。
+const botNames = argv
+  .reduce((acc, a, i) => (a === '--bot' ? [...acc, argv[i + 1]] : acc), [])
+  .concat(tapBots);
 let excluded = new Set(botNames);
 if (userOnly && excluded.size === 0) {
   const counts = new Map();
@@ -190,11 +228,17 @@ if (userOnly && excluded.size === 0) {
   const human = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
   if (human) excluded = new Set([...counts.keys()].filter((n) => n !== human[0]));
 }
-const rows = all.filter((r) => !userOnly || !excluded.has(r.sender));
+let rows = all.filter((r) => !userOnly || !excluded.has(r.sender));
+let shown = extras;
+if (sinceStamp) {
+  rows = rows.filter((r) => pad(r.ts) >= sinceStamp);
+  shown = shown.filter((r) => localStamp(r.ts) >= sinceStamp);
+}
 
 // ---------- output ----------
 const cov = {
   channel, target: bareTarget, agents: agentIds,
+  since: sinceStamp, shown: rows.length + shown.length,
   files: stats,
   recovered: all.length, withId: all.length, extraWithoutId: extras.length,
   idRange: all.length ? [all[0].id, all[all.length - 1].id] : null,
@@ -204,20 +248,20 @@ const cov = {
 };
 
 if (format === 'json') {
-  console.log(JSON.stringify({ coverage: cov, messages: rows, extras }, null, 1));
+  console.log(JSON.stringify({ coverage: cov, messages: rows, extras: shown }, null, 1));
 } else if (format === 'md') {
   console.log(`# ${channel}:${bareTarget}\n`);
   console.log(`| # | 時間 | 發話者 | 內容 |\n|---|---|---|---|`);
   for (const r of rows) console.log(`| ${r.id} | ${r.ts} | ${r.sender} | ${r.text.replace(/\|/g, '\\|').replace(/\n/g, '<br>')} |`);
-  if (extras.length) {
+  if (shown.length) {
     console.log(`\n## 無 message id（僅存在於 transcript）\n`);
-    for (const r of extras) console.log(`- \`${r.iso}\` **${r.sender}**：${r.text.replace(/\n/g, ' ⏎ ')}`);
+    for (const r of shown) console.log(`- \`${r.iso}\` **${r.sender}**：${r.text.replace(/\n/g, ' ⏎ ')}`);
   }
 } else {
   for (const r of rows) console.log(`#${r.id}\t${r.ts}\t${r.sender}\t${JSON.stringify(r.text)}`);
-  if (extras.length) {
+  if (shown.length) {
     console.log('\n=== extra (transcript only, no message id) ===');
-    for (const r of extras) console.log(`${r.iso}\t${r.sender}\t${JSON.stringify(r.text)}`);
+    for (const r of shown) console.log(`${r.iso}\t${r.sender}\t${JSON.stringify(r.text)}`);
   }
 }
 console.error('[coverage] ' + JSON.stringify(cov));

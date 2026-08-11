@@ -38,11 +38,25 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 EXIT_OK = 0
 EXIT_PASS = 20
+
+# 問模型的時間預算。route 的 timeoutMs 是 60 秒（AUTHORING.md 建議值），
+# 到點直接 kill——那時我們連 exit 20 都來不及，使用者是真的什麼都收不到。
+# 所以自己先在 48 秒收手，永遠留得下把控制權交還給 AI 的餘裕。
+#
+# 預算是「從整支 script 開機算起」而不是「每次呼叫各自計時」，重試才不會
+# 疊出 45+45。實測一次呼叫約 9–16 秒，所以快速失敗（額度用完、gateway 忙）
+# 一定重試得到，慢到 40 秒的那次則自然不重試——本來就跟修好前一樣。
+STARTED = time.monotonic()
+BUDGET = 48.0        # 分類總共最多用掉幾秒
+ATTEMPT_CAP = 40.0   # 單次呼叫上限
+MIN_ATTEMPT = 12.0   # 剩不到這麼多秒就別再問了，問了也答不完
+RETRY_PAUSE = 1.0    # 隔一下再問，別在對方喘不過氣時連打
 
 try:
     # newline="" 關掉 Windows 的 \n → \r\n 轉換：回覆是要送進聊天室的字串，
@@ -53,7 +67,12 @@ except Exception:
 
 
 class Decline(Exception):
-    """還沒動手，交給 AI。"""
+    """還沒動手，交給 AI。
+
+    訊息是給 debug log 用的短標籤（例如 `classify:timeout`）。不填就是
+    最常見的那種：格式看不懂。填了的地方都是「看得懂但半路出事」，
+    下次翻 log 時這兩類要分得開。
+    """
 
 
 def fail(message):
@@ -187,6 +206,20 @@ def strip_tail(line, category_names):
     return line.strip(), info
 
 
+def edit_when(text):
+    """`358 時間 8/9 12:09` 的後半段 → book.py `edit --when` 的值。
+
+    只講時間就原樣傳 `HH:MM`，**不要在這裡補上今天**：那筆帳是哪一天只有
+    book.py 查得到，在這裡猜會把舊帳搬到今天。整串看不懂就回 None（Decline）。
+    """
+    core, info = strip_tail(text, [])
+    if core or (not info["date"] and not info["time"]):
+        return None
+    if info["date"] and info["time"]:
+        return f"{info['date']} {info['time']}"
+    return info["date"] or info["time"]
+
+
 def when(info):
     """把剝出來的日期時間組成 book.py 的 --date 參數；都沒有就回 None。"""
     date, time = info["date"], info["time"]
@@ -289,6 +322,11 @@ RE_CAT_REPLACE_HEAD = re.compile(
 )
 SPLIT_LIST = re.compile(r"[、,，]+")
 RE_IDS = re.compile(r"^(\d{1,9}(?:\s+\d{1,9})*)\s*(.*)$")
+# 「358 時間 …」。有這條之前，這種講法會掉進最後的「改品項名」，
+# 把品項改成「時間 8/7 15:42」而時間文風不動——沒接到還好，做錯事最糟。
+RE_FIELD_WHEN = re.compile(
+    r"^(?:日期時間|日期|時間|時刻)\s*(?:改成|改為|改到|改在|記在|是|為)?\s*[:：]?\s*(.+)$"
+)
 RE_DELETE_FIRST = re.compile(r"^(?:刪除|刪掉)\s*(\d{1,9}(?:\s+\d{1,9})*)$")
 RE_CORE_BALANCE = re.compile(r"^(?P<item>.*?\D)\s*(?:後|完)\s*(?:剩(?:下)?)?\s*(?P<value>\d{1,9})$")
 RE_CORE_AMOUNT = re.compile(r"^(?P<item>.*?\D)\s*(?P<value>\d{1,9})$")
@@ -409,6 +447,12 @@ def parse_by_id(line, names, existing_id):
 
     if rest in ("刪除", "刪掉", ""):
         return {"do": "book", "argv": ["delete"] + flags}
+    match = RE_FIELD_WHEN.match(rest)
+    if match:
+        value = edit_when(match.group(1))
+        if not value:
+            raise Decline("edit-when-unparsed")
+        return {"do": "book", "argv": ["edit"] + flags + ["--when", value]}
     for word, flag in (("名稱", "--note"), ("品項", "--note"), ("金額", "--to")):
         if rest.startswith(word):
             value = rest[len(word):].strip()
@@ -478,11 +522,15 @@ def parse_entry(line, names):
     # 就會被擋下來交給 AI，而不是默默記成一筆金額 1 的爛帳。
     # 代價是「Costco 牛排 500」這種帶空白的品項也走 AI，可以接受。
     if any(ch.isspace() for ch in item):
-        raise Decline()
+        raise Decline("core-has-space")
+    category = info["category"]
+    # 「孝親費1000」：品項本身就是科目名。省下一趟問模型，答案還更確定。
+    if category is None and item in names:
+        category = item
     return {
         "do": "entry", "item": item, "mode": mode,
         "value": match.group("value"), "date": when(info),
-        "category": info["category"],
+        "category": category,
     }
 
 
@@ -521,17 +569,81 @@ def find_openclaw_mjs():
     return next((str(c) for c in candidates if c.is_file()), None)
 
 
+ANSWER_TRIM = "「」『』\"'`*-•· \t"
+
+
+def read_answer(text, items, names):
+    """模型回的整段文字 → {品項: (kind, category)}。
+
+    只認封閉集合裡的答案（AUTHORING.md 規則 3），但對包裝寬容：全形＝、
+    項目符號、引號、句尾標點都先剝掉。剝錯的下場只是這個品項沒判出來，
+    整則交給 AI；不會寫錯資料。
+    """
+    resolved = {}
+    for row in text.replace("＝", "=").splitlines():
+        if "=" not in row:
+            continue
+        item, _, answer = row.partition("=")
+        item = item.strip().strip(ANSWER_TRIM).strip()
+        answer = answer.strip().strip(ANSWER_TRIM).strip(PUNCT).strip()
+        if item not in items:
+            continue
+        if answer in ("收入", "入金"):
+            resolved[item] = ("in", None)
+        elif answer in names:
+            resolved[item] = ("out", answer)
+    return resolved
+
+
+def ask_model(command, items, names, timeout):
+    """問一次。回傳 (答案, 失敗原因)；成功時原因是空字串。
+
+    原因字串會進 debug log。上線第一天就是靠「log 只寫 pass、不寫為什麼」
+    才查不出到底是格式沒認得還是模型當掉，所以這裡每條岔路都留名字。
+    """
+    try:
+        done = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8", timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return None, "classify:timeout"
+    except OSError as exc:
+        return None, f"classify:spawn:{exc.__class__.__name__}"
+    if done.returncode != 0:
+        return None, f"classify:rc={done.returncode}:{(done.stderr or '').strip()[:160]}"
+    try:
+        payload = json.loads(done.stdout)
+    except ValueError:
+        return None, "classify:not-json"
+    if not isinstance(payload, dict):
+        return None, "classify:not-json"
+    if payload.get("ok") is False:
+        return None, f"classify:not-ok:{str(payload.get('error'))[:160]}"
+    text = "\n".join(
+        (o or {}).get("text") or "" for o in (payload.get("outputs") or [])
+    )
+    resolved = read_answer(text, items, names)
+    missing = [i for i in items if i not in resolved]
+    if missing:
+        return None, "classify:unresolved:" + "、".join(missing)[:80]
+    return resolved, ""
+
+
 def classify(book, items, names):
-    """問一次模型，一次判完所有未知品項。回傳 {品項: (kind, category)}。
+    """問模型，一次判完所有未知品項。回傳 {品項: (kind, category)}。
 
     用 `openclaw infer model run`（不指定 --model）：吃的就是設定裡的
     agents.defaults.model，primary 掛掉會自動換 fallbacks，跟 agent turn
     享受同一套 routing。--gateway 是必要的——本機模式要自行初始化 provider，
     實測 30 秒，走已經開著的 gateway 只要 9 秒。
+
+    失敗會再問一次。上線第一天四筆漏接裡有兩筆是這裡一次不成就整則放棄，
+    其中一筆還是「四行只有一個新品項」被一個未知品項拖垮，AI 接手後把
+    科目記錯。重問一次的成本遠低於叫醒 AI，而且這條路還沒有副作用。
     """
     mjs = find_openclaw_mjs()
     if not mjs or not items:
-        raise Decline()
+        raise Decline("classify:no-openclaw" if not mjs else "classify:no-items")
     hints = "\n".join(
         f"{name}：{book.CATEGORY_HINTS[name]}"
         for name in names if name in book.CATEGORY_HINTS
@@ -552,36 +664,17 @@ def classify(book, items, names):
         os.environ.get("OPENCLAW_NODE", "node"), mjs,
         "infer", "model", "run", "--gateway", "--json", "--prompt", prompt,
     ]
-    try:
-        done = subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8", timeout=45
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        raise Decline()
-    if done.returncode != 0:
-        raise Decline()
-    try:
-        payload = json.loads(done.stdout)
-        text = "\n".join(o.get("text") or "" for o in payload.get("outputs") or [])
-    except (ValueError, AttributeError):
-        raise Decline()
-
-    resolved = {}
-    for row in text.splitlines():
-        if "=" not in row:
-            continue
-        item, _, answer = row.partition("=")
-        item, answer = item.strip(), answer.strip()
-        if item not in items:
-            continue
-        if answer in ("收入", "入金"):
-            resolved[item] = ("in", None)
-        elif answer in names:
-            resolved[item] = ("out", answer)
-    # 有任何一個沒判出來，整則交給 AI——寧可多花 token，也不要記錯科目
-    if any(item not in resolved for item in items):
-        raise Decline()
-    return resolved
+    reason = "classify:no-budget"
+    while True:
+        left = BUDGET - (time.monotonic() - STARTED)
+        if left < MIN_ATTEMPT:
+            break
+        resolved, reason = ask_model(command, items, names, min(left, ATTEMPT_CAP))
+        if resolved is not None:
+            return resolved
+        time.sleep(RETRY_PAUSE)
+    # 兩次都不成才放棄。寧可多花 token，也不要記錯科目。
+    raise Decline(reason)
 
 
 def resolve_entries(book, con, actions, names):
@@ -607,9 +700,9 @@ def resolve_entries(book, con, actions, names):
         if action["do"] != "entry":
             continue
         if action["kind"] == "out" and action["category"] not in names:
-            raise Decline()
+            raise Decline("category-not-in-list:" + str(action["category"]))
         if action["kind"] == "in" and action["mode"] == "balance":
-            raise Decline()  # 入金沒有倒推這回事
+            raise Decline("income-has-no-backfill")  # 入金沒有倒推這回事
 
 
 def entry_argv(action):
@@ -681,19 +774,21 @@ def main():
     try:
         lines = [l for l in normalize(body).split("\n") if l.strip()]
         if not lines or len(lines) > 40:
-            raise Decline()
+            raise Decline("empty" if not lines else "too-many-lines")
         block = parse_category_replace(lines)
         actions = [block] if block else [
             parse_line(line, names, lambda i: i in known_ids) for line in lines
         ]
         resolve_entries(book, con, actions, names)
-    except Decline:
+    except Decline as exc:
         con.close()
-        log({"body": body, "result": "pass"})
+        # why 是給開發者看的：光看 "pass" 分不出「格式沒認得」和「模型當掉」，
+        # 而這兩件事的修法完全不同（改 parser vs. 改重試）。
+        log({"body": body, "result": "pass", "why": str(exc) or "unparsed"})
         sys.exit(EXIT_PASS)
     except RecursionError:
         con.close()
-        log({"body": body, "result": "pass"})
+        log({"body": body, "result": "pass", "why": "recursion"})
         sys.exit(EXIT_PASS)
     con.close()
 

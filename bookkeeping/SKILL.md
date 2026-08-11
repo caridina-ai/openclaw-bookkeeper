@@ -113,13 +113,17 @@ uv run "<本 SKILL.md 所在目錄>/scripts/book.py"
 **使用者若說了編號就直接用 `--rowid`**（`把 358 改成居住費`、`358 那筆刪掉`），
 不必再搜尋一輪。`--rowid` 可重複，就是批次操作。
 
-`edit` 一次只改一個欄位，三選一：
+`edit` 一次只改一個欄位，四選一：
 
 | 要改什麼 | 旗標 |
 |---|---|
 | 金額 | `--to <新金額>` |
 | 科目 | `--category <現有科目>` |
 | 品項名 | `--note <新品項>` |
+| 日期時間 | `--when <YYYY-MM-DD HH:MM｜YYYY-MM-DD｜HH:MM>` |
+
+改時間用 `--when`，**不要用 `--date`**——`--date` 是搜尋條件（要找哪一天的帳），
+不是要改成哪一天。`--when` 只給日期就留著原本的時間，只給 `HH:MM` 就留著原本的日期。
 
 沒有編號時才用 `--find` 搜尋，不從報表內容猜編號。
 
@@ -188,6 +192,7 @@ uv run "<本 SKILL.md 所在目錄>/scripts/book.py"
 <BOOK> edit --rowid <編號> [--rowid <編號> ...] --to <新金額>
 <BOOK> edit --rowid <編號> [--rowid <編號> ...] --category "<現有科目>"
 <BOOK> edit --rowid <編號> [--rowid <編號> ...] --note "<新品項>"
+<BOOK> edit --rowid <編號> [--rowid <編號> ...] --when "<YYYY-MM-DD HH:MM 或 YYYY-MM-DD 或 HH:MM>"
 <BOOK> delete --find "<關鍵字1>" [--find "<關鍵字2>" ...] [--amount <原金額>] [--date "<YYYY-MM-DD 或 YYYY-MM-DD HH:MM>"]
 <BOOK> delete --rowid <編號> [--rowid <編號> ...]
 

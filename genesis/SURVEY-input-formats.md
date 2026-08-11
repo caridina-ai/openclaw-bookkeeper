@@ -285,7 +285,7 @@ DESIGN.md §5 第一條：**被 interceptor 攔掉的訊息不會寫進 session 
 
 # 階段一定案
 
-依 `FEEDBACK1.md` 與後續討論收斂。**階段二以本節為準**，前面章節是推導過程。
+依 `FEEDBACK-input-formats.md` 與後續討論收斂。**階段二以本節為準**，前面章節是推導過程。
 
 ## 0　總原則：固化，不是產品
 

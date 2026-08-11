@@ -25,6 +25,7 @@
 import argparse
 import csv
 import os
+import re
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -385,6 +386,29 @@ def build_dt(date):
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+RE_HHMM = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def apply_when(dt, value):
+    """`edit --when` 的三種精度，沒講到的部分沿用原本那筆的值。
+
+        2026-08-09 12:09  整個換掉
+        2026-08-09        只換日期，時間留著
+        12:09             只換時間，日期留著
+
+    「只換時間」不能在呼叫端補成今天——那筆帳是哪一天只有這裡查得到，
+    在外面猜就會把 8/9 的帳搬到今天（正是 `74 時間 8/9 12:09` 修好前的災情）。
+    """
+    raw = str(value).strip()
+    match = RE_HHMM.match(raw)
+    if match:
+        return f"{dt[:10]} {int(match.group(1)):02d}:{match.group(2)}:00"
+    normalized = normalize_date(raw)
+    if len(normalized) == 16:
+        return normalized + ":00"
+    return normalized + " " + dt[11:19]
+
+
 def input_prefix(dt, date):
     # 沒指定日期時間時維持簡潔；有指定就照精度顯示。
     if not date:
@@ -631,9 +655,12 @@ def cmd_out(con, a):
 
 
 def cmd_edit(con, a):
-    fields = [f for f in (a.to, a.category, a.note) if f is not None]
+    fields = [f for f in (a.to, a.category, a.note, a.when) if f is not None]
     if len(fields) != 1:
-        print("錯誤：--to（金額）、--category（科目）、--note（品項）請擇一提供")
+        print(
+            "錯誤：--to（金額）、--category（科目）、--note（品項）、"
+            "--when（日期時間）請擇一提供"
+        )
         return
     lines = []
     with write_transaction(con):
@@ -658,6 +685,16 @@ def cmd_edit(con, a):
                     f"{prefix_for(a, dt)}#{eid} {new_category} "
                     f"({note}) {int(amount)} 餘額 {balance(con)}"
                     + learned_line(note, new_category, previous)
+                )
+        elif a.when is not None:
+            for eid, dt, kind, category, note, amount in rows:
+                new_dt = apply_when(dt, a.when)
+                con.execute("UPDATE entries SET dt=? WHERE id=?", (new_dt, eid))
+                # 改的就是時間，所以一律把新的日期時間顯示出來讓人確認，
+                # 不走 entry_prefix 那套「今天就不顯示」的省略。
+                lines.append(
+                    f"{new_dt[:16]} #{eid} {label_of(kind, category)} "
+                    f"({note}) {int(amount)} 餘額 {balance(con)}"
                 )
         elif a.note is not None:
             new_note = str(a.note).strip()
@@ -1108,6 +1145,7 @@ GUIDE_SECTIONS = [
         ("358 359 360 居住費", "一次改好幾筆"),
         ("424 名稱 巷口饅頭", "改品項名稱"),
         ("358 金額 80", "改金額"),
+        ("358 時間 8/9 12:09", "改日期時間，也可只打 8/9 或只打 12:09"),
         ("358 刪除", "刪掉這筆，也可以打「刪除 358」"),
     ]),
     ("【餘額與回顧】", [
@@ -1202,6 +1240,7 @@ def main():
     pe.add_argument("--to")               # 新金額
     pe.add_argument("--category")         # 新科目
     pe.add_argument("--note")             # 新品項名
+    pe.add_argument("--when")             # 新日期時間（--date 是搜尋條件，不是這個）
     pe.add_argument("--date")
 
     pd = sub.add_parser("delete")         # 刪除

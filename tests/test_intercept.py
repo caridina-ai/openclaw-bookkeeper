@@ -124,6 +124,16 @@ class InterceptTest(unittest.TestCase):
         )
         self.assertIn("公關費 (菊花茶) 15", self.handled("菊花茶15 記在 公關費"))
 
+    def test_an_item_that_is_itself_a_category_needs_no_model(self):
+        """`孝親費1000`：品項就是科目名，沒什麼好判的。
+
+        測試環境的 OPENCLAW_MJS 指向不存在的檔，所以只要還想問模型就會
+        exit 20；能 handled 就證明這趟真的省下來了。
+        """
+        self.handled("起始餘額9000")
+        self.assertIn("孝親費 (孝親費) 1000", self.handled("孝親費1000"))
+        self.assertIn("2026-08-11 13:32", self.handled("孝親費1000 8/11 13:32"))
+
     def test_overstripped_leftovers_never_become_a_bogus_entry(self):
         # 剝掉「19:30」後會剩「理髮150 時間幫我記在1」，品項帶空白 → 交還 AI，
         # 絕不能默默記成一筆金額 1 的爛帳
@@ -163,6 +173,29 @@ class InterceptTest(unittest.TestCase):
         self.assertIn("79 -> 80", self.handled("2 金額 80"))
         self.assertIn("刪除 #4", self.handled("4 刪除"))
         self.assertIn("刪除 #3", self.handled("刪除 3"))
+
+    def test_edit_by_id_changes_the_datetime_at_three_precisions(self):
+        """`74 時間 8/9 12:09`。
+
+        修好前這句會掉進「改品項名」，把品項改成「時間 8/9 12:09」而時間
+        文風不動——沒接到頂多花 token，做錯事是要人工收拾的，所以釘住。
+        """
+        self.handled("起始餘額9000")
+        self.handled("水果127 買菜金 8/9 22:09")
+        out = self.handled("2 時間 8/9 12:09")
+        self.assertIn("2026-08-09 12:09 #2 買菜金 (水果) 127", out)
+        # 只給時間：留著原本的日期
+        self.assertIn("2026-08-09 13:30", self.handled("2 時間 13:30"))
+        # 只給日期：留著原本的時間
+        self.assertIn("2026-08-10 13:30", self.handled("2 時間 8/10"))
+        # 品項自始至終沒被動過
+        self.assertIn("(水果)", self.book("detail", "--month", "2026-08"))
+
+    def test_unparsable_datetime_is_left_to_the_ai_instead_of_becoming_a_note(self):
+        self.handled("起始餘額9000")
+        self.handled("水果127 買菜金")
+        self.declined("2 時間 下次再說")
+        self.assertIn("(水果)", self.book("detail"))
 
     def test_typo_in_category_is_caught_instead_of_renaming_the_note(self):
         self.handled("起始餘額9000")
@@ -291,6 +324,16 @@ class InterceptTest(unittest.TestCase):
         self.declined("這句話我看不懂", **extra)
         rows = [json.loads(l) for l in self.log.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([r["result"] for r in rows], ["handled", "pass"])
+        # 交還 AI 一定要寫原因：光看 "pass" 分不出「格式沒認得」和「模型當掉」，
+        # 而這兩件事的修法完全不同。
+        self.assertEqual(rows[1]["why"], "unparsed")
+
+    def test_declining_because_the_model_is_unreachable_says_so_in_the_log(self):
+        extra = {"BOOKKEEPING_DEBUG": "1"}
+        self.handled("起始餘額5000", **extra)
+        self.declined("沒看過的品項123", **extra)   # OPENCLAW_MJS 指向不存在的檔
+        rows = [json.loads(l) for l in self.log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[-1]["why"], "classify:no-openclaw")
 
     def test_missing_book_py_is_an_error_not_a_decline(self):
         """引擎不見了要當成錯誤（非 0），不能 exit 20 讓 AI 以為只是不認得。"""
