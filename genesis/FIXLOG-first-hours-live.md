@@ -1,6 +1,6 @@
 # FIXLOG：上線頭三小時
 
-對應 `ISSUE-first-hours-live.md`。四筆失敗全數修掉，`.ops` 的 `since`
+對應 `ISSUE-first-hours-live.md`。四筆失敗全數修掉，`.tap` 的 `since`
 已推到 `2026-08-11 15:58`。
 
 ---
