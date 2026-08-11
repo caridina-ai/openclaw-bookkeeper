@@ -1,0 +1,10 @@
+# 使用者帳目資料，不進版控
+data/
+# 安裝單元裡絕不能出現帳本：那會被 openclaw skills install 一起裝上去，
+# 覆蓋掉使用場景的真實帳本。
+bookkeeping/data/
+__pycache__/
+*.pyc
+.pytest_cache/
+genesis/.tap
+.claude/
