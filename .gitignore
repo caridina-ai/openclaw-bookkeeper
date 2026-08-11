@@ -6,5 +6,8 @@ bookkeeping/data/
 __pycache__/
 *.pyc
 .pytest_cache/
-genesis/.tap
+# 維護現場檔（genesis/.ops）：私密 id ＋ 本機絕對路徑，換台機器就是另一份。
+# **絕不進版控**，這是 genesis 通則，不是這個專案的特例。
+# 不寫死 genesis/ 是因為別的專案可能放在別層——叫這個名字的一律擋掉。
+.ops
 .claude/

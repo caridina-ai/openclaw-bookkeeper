@@ -1,6 +1,6 @@
 # FIXLOG：上線頭三小時
 
-對應 `ISSUE-first-hours-live.md`。四筆失敗全數修掉，`.tap` 的 `since`
+對應 `ISSUE-first-hours-live.md`。四筆失敗全數修掉，`.ops` 的 `since`
 已推到 `2026-08-11 15:58`。
 
 ---
@@ -100,9 +100,6 @@
 
 ## 下一輪怎麼開始
 
-1. `node genesis/tools/dump-channel.js --tap genesis/.tap --user-only`
-   （`since` 自動生效，只印上次看到之後的）
-2. 對照 `~/.openclaw/logs/bookkeeping.log` 同一時段，先看 `why`
-3. 產出 `ISSUE-{slug}.md`，確認後才動手
-4. 修完 → `uv run --with pytest python -m pytest tests/ -q` → 複製到 `deploy:`
-5. 產出 `FIXLOG-{slug}.md`，把 `.tap` 的 `since` 推到當下
+流程寫在 `README.md`，這裡不重複（重複就會走鐘）。這一輪留給下一輪的只有
+一句：**先看 log 的 `why`**，它是這次才加的，能直接分開「格式沒認得」
+和「模型當掉」——這兩件事的修法完全相反，而這次就是卡在分不出來。

@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // 把某個 chat channel 在 OpenClaw 本機留下的全部對話撈出來。
 //
-//   node dump-channel.js --tap ../.tap
+//   node dump-channel.js --ops ../.ops
 //   node dump-channel.js --channel telegram --target -100XXXXXXXXXX --format md
-//   node dump-channel.js --tap ../.tap --user-only --format txt
+//   node dump-channel.js --ops ../.ops --user-only --format txt
 //
-// .tap 長這樣（本身不進版控，裡面有頻道 id）：
+// --ops 吃的是 genesis 的維護現場檔（`鍵: 值`，# 是註解，本身不進版控）。
+// 整份的欄位見 genesis/README.md；這支只挑得出這四個：
 //   channel: telegram
-//   target: -100XXXXXXXXXX
-//   since: 2026-08-11 15:58      ← 上次檢討看到哪裡；# 開頭的行是註解
+//   target:  -100XXXXXXXXXX
+//   since:   2026-08-11 15:58    ← 上次檢討看到哪裡
+//   bot:     caridina            ← 可重複，--user-only 要濾掉誰
 //
 // since 會自動生效：只印那個時間點之後的紀錄，要看全部就 --since 0。
 // 每做完一輪檢討就把 since 推到當下——它是接力棒，不是紀念碑。
@@ -45,20 +47,21 @@ const has = (name) => argv.includes('--' + name);
 let channel = arg('channel');
 let target = arg('target');
 let since = arg('since');
-const tapBots = [];
-const tapPath = arg('tap');
-if (tapPath) {
-  for (const line of fs.readFileSync(tapPath, 'utf8').split('\n')) {
+const opsBots = [];
+const opsPath = arg('ops');
+if (opsPath) {
+  for (const line of fs.readFileSync(opsPath, 'utf8').split('\n')) {
+    // 認得的鍵只有這四個，其餘（repo/test/deploy/log…）是給人看的，略過。
     const m = line.match(/^\s*(channel|target|since|bot)\s*:\s*(.+?)\s*$/);
     if (!m) continue;                       // # 開頭的註解就是這樣被略過的
     if (m[1] === 'channel') channel = m[2];
     else if (m[1] === 'target') target = m[2];
-    else if (m[1] === 'bot') tapBots.push(m[2]);
-    else if (since === undefined) since = m[2];   // --since 蓋過 .tap
+    else if (m[1] === 'bot') opsBots.push(m[2]);
+    else if (since === undefined) since = m[2];   // --since 蓋過 .ops
   }
 }
 if (!channel || !target) {
-  console.error('usage: node dump-channel.js (--tap <file> | --channel <c> --target <id>) [--agent <id>] [--format md|txt|json] [--user-only] [--since "YYYY-MM-DD HH:MM"|0]');
+  console.error('usage: node dump-channel.js (--ops <file> | --channel <c> --target <id>) [--agent <id>] [--format md|txt|json] [--user-only] [--since "YYYY-MM-DD HH:MM"|0]');
   process.exit(2);
 }
 
@@ -216,11 +219,11 @@ const missing = [];
 if (all.length) for (let i = all[0].id; i <= all[all.length - 1].id; i++) if (!byId.has(String(i))) missing.push(i);
 
 // --user-only 只留人類發言。機器人叫什麼名字每個人不一樣：先看 --bot
-// （可重複），再看 .tap 的 bot:，都沒有才退回「只留出現次數最多的那個
-// 發話者」這個粗略猜法——猜錯會整份濾錯，所以 .tap 裡該寫就寫。
+// （可重複），再看 .ops 的 bot:，都沒有才退回「只留出現次數最多的那個
+// 發話者」這個粗略猜法——猜錯會整份濾錯，所以 .ops 裡該寫就寫。
 const botNames = argv
   .reduce((acc, a, i) => (a === '--bot' ? [...acc, argv[i + 1]] : acc), [])
-  .concat(tapBots);
+  .concat(opsBots);
 let excluded = new Set(botNames);
 if (userOnly && excluded.size === 0) {
   const counts = new Map();
